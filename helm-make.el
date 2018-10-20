@@ -86,15 +86,20 @@ You can reset the cache by calling `helm-make-reset-db'."
   :type 'string
   :group 'helm-make)
 
+(defcustom helm-make-waf-executable "./waf"
+  "Store the name of waf executable."
+  :type 'string
+  :group 'helm-make)
+
 (defcustom helm-make-niceness 0
   "When non-zero, run make jobs at this niceness level."
   :type 'integer
   :group 'helm-make)
 
 (defcustom helm-make-arguments "-j%d"
-  "Pass these arguments to `helm-make-executable' or
-`helm-make-ninja-executable'. If `%d' is included, it will be substituted
- with the universal argument."
+  "Pass these arguments to `helm-make-executable', `helm-make-ninja-executable',
+or `helm-make-waf-executabe'. If `%d' is included, it will be substituted with
+the universal argument."
   :type 'string
   :group 'helm-make)
 
@@ -134,6 +139,9 @@ An exception is \"GNUmakefile\", only GNU make understands it.")
 (defvar helm-make-ninja-filename "build.ninja"
   "Ninja build filename which ninja recognizes.")
 
+(defvar helm-make-waf-filename "wscript"
+  "Waf wscript filename.")
+
 (defun helm--make-action (target)
   "Make TARGET."
   (let* ((targets (and (eq helm-make-completion-method 'helm)
@@ -158,27 +166,34 @@ An exception is \"GNUmakefile\", only GNU make understands it.")
       (rename-buffer buffer-name))))
 
 (defvar helm--make-build-system nil
-  "Will be 'ninja if the file name is `build.ninja',
-and if the file exists 'make otherwise.")
+  "Will be 'ninja if the file name is `build.ninja' and exists, 'waf if
+the file name is `wscript' and exists, and 'make otherwise ")
 
 (defun helm--make-construct-command (arg file)
   "Construct the `helm-make-command'.
 
 ARG should be universal prefix value passed to `helm-make' or
-`helm-make-projectile', and file is the path to the Makefile or the
-ninja.build file."
-  (format (concat "%s%s -C %s " helm-make-arguments " %%s")
+`helm-make-projectile', and file is the path to the Makefile, ninja.build, or
+wscript file."
+  ;; TODO: Handle -C for ninja and make
+  (format (concat "%s%s %s " helm-make-arguments " %%s")
           (if (= helm-make-niceness 0)
               ""
             (format "nice -n %d " helm-make-niceness))
           (cond
             ((equal helm--make-build-system 'ninja)
              helm-make-ninja-executable)
+            ((equal helm--make-build-system 'waf)
+             helm-make-waf-executable)
             (t
              helm-make-executable))
-          (replace-regexp-in-string
-           "^/\\(scp\\|ssh\\).+?:" ""
-           (file-name-directory file))
+          (cond
+           ((equal helm--make-build-system 'waf)
+            "")
+           (t
+            (replace-regexp-in-string
+              "^/\\(scp\\|ssh\\).+?:" ""
+              (file-name-directory file))))
           arg))
 
 ;;;###autoload
@@ -222,9 +237,9 @@ ninja.build file."
       (while (re-search-forward "^\\([^%$:#\n\t ]+\\):\\([^=]\\|$\\)" nil t)
         (setq target (match-string 1))
         (unless (or (save-excursion
-		      (goto-char (match-beginning 0))
-		      (forward-line -1)
-		      (looking-at "^# Not a target:"))
+          (goto-char (match-beginning 0))
+          (forward-line -1)
+          (looking-at "^# Not a target:"))
                     (string-match "^\\([/a-zA-Z0-9_. -]+/\\)?\\." target))
           (push target targets))))
     targets))
@@ -244,21 +259,20 @@ ninja.build file."
 (defcustom helm-make-list-target-method 'default
   "Method of obtaining the list of Makefile targets.
 
-For ninja build files there exists only one method of obtaining the list of
-targets, and hence no `defcustom'."
+For ninja and waf build files there exists only one method of obtaining the list
+of targets, and hence no `defcustom'."
   :type '(choice
           (const :tag "Default" default)
           (const :tag "make -qp" qp)))
 
 (defun helm--make-makefile-exists (base-dir &optional dir-list)
-  "Check if one of `helm-make-makefile-names' and `helm-make-ninja-filename'
- exist in BASE-DIR.
+  "Check if one of `helm-make-makefile-names', `helm-make-ninja-filename', or
+ `helm-make-waf-filename' exists in BASE-DIR.
 
-Returns the absolute filename to the Makefile, if one exists,
-otherwise nil.
+Returns the absolute filename to the Makefile, if one exists, otherwise nil.
 
-If DIR-LIST is non-nil, also search for `helm-make-makefile-names' and
-`helm-make-ninja-filename'."
+If DIR-LIST is non-nil, also search for `helm-make-makefile-names',
+`helm-make-ninja-filename', and `helm-make-waf-filename'."
   (let* ((default-directory (file-truename base-dir))
          (makefiles
           (progn
@@ -266,7 +280,7 @@ If DIR-LIST is non-nil, also search for `helm-make-makefile-names' and
               (setq dir-list (list "")))
             (let (result)
               (dolist (dir dir-list)
-                (dolist (makefile `(,@helm-make-makefile-names ,helm-make-ninja-filename))
+                (dolist (makefile `(,@helm-make-makefile-names ,helm-make-ninja-filename ,helm-make-waf-filename))
                   (push (expand-file-name makefile dir) result)))
               (reverse result))))
          (makefile (cl-find-if 'file-exists-p makefiles)))
@@ -274,6 +288,8 @@ If DIR-LIST is non-nil, also search for `helm-make-makefile-names' and
       (cond
         ((string-match "build\.ninja$" makefile)
          (setq helm--make-build-system 'ninja))
+        ((string-match "wscript$" makefile)
+         (setq helm--make-build-system 'waf))
         (t
          (setq helm--make-build-system 'make))))
     makefile))
@@ -307,6 +323,8 @@ and cache targets of MAKEFILE, if `helm-make-cache-targets' is t."
                       (cond
                         ((equal helm--make-build-system 'ninja)
                          (helm--make-target-list-ninja makefile))
+                        ((equal helm--make-build-system 'waf)
+                         '("build" "configure" "clean" "install" "list"))
                         ((equal helm-make-list-target-method 'qp)
                          (helm--make-target-list-qp makefile))
                         (t
